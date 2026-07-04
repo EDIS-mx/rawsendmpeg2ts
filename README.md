@@ -2,6 +2,9 @@
 
 Reproduce una vez un archivo MPEG-TS CBR sobre UDP, sin remux ni modificación del payload. Es un test mínimo para alimentar un IRD de hardware con datagramas uniformemente espaciados. El programa está escrito en C11 y usa únicamente POSIX y sockets IPv4. No pretende ser un sender de producción ni una herramienta MPEG-TS general.
 
+<img width="543" height="461" alt="Captura de pantalla_20260703_183618" src="https://github.com/user-attachments/assets/38ed49d3-7b1d-4b70-b5a7-baf8347c697f" />
+
+
 ## Build
 
 ```bash
