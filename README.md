@@ -12,7 +12,7 @@ cmake -B build
 cmake --build build
 
 # El binario queda en `build/rawsendmpeg2ts`.
-$ rawsendmpeg2ts <file.ts> <ip:port>
+$ rawsendmpeg2ts <file.ts|--stdin> <ip:port>
 ```
 
 Ejemplo:
@@ -20,6 +20,31 @@ Ejemplo:
 ```bash
 ./build/rawsendmpeg2ts /path/to/golden.ts 239.1.74.20:9009
 ```
+
+Un TS CBR null-stuffed también puede llegar por stdin. El sender conserva en memoria el tramo de
+aproximadamente un segundo usado para derivar la tasa y después continúa leyendo la tubería:
+
+```bash
+cat /path/to/golden.ts |
+  ./build/rawsendmpeg2ts --stdin 239.1.74.20:9009
+```
+
+Para convertir la salida TS non-stuffed de MoQ en CBR antes del pacing UDP:
+
+```bash
+/home/ariel/projects/moq-dev.main/target/release/moq \
+    --client-connect https://192.168.99.6 \
+    --client-tls-disable-verify \
+    --broadcast test/bbb \
+    export ts |
+  ffmpeg -hide_banner -loglevel warning \
+    -i pipe:0 -map 0:v:0 -map 0:a:0 -c copy \
+    -muxrate 11M -pcr_period 20 -f mpegts pipe:1 |
+  ./build/rawsendmpeg2ts --stdin 239.1.74.20:9009
+```
+
+FFmpeg realiza el remux y agrega null stuffing. `rawsendmpeg2ts` deriva el muxrate resultante y corrige
+la cadencia UDP. No usar `-re` en esta tubería: el sender raw es el único dueño del pacing final.
 
 El destino debe ser IPv4. Para multicast se configura TTL 4 y se desactiva multicast loopback. La
 interfaz de egreso la decide la ruta del sistema operativo:
@@ -33,7 +58,7 @@ ip route get 239.1.74.20
 1. Verifica que el archivo sea una secuencia completa de paquetes TS de 188 bytes.
 2. Encuentra el primer PID con PCR.
 3. Mide aproximadamente un segundo de separación PCR y deriva la tasa a partir de bytes/PCR.
-4. Rebobina el archivo.
+4. Rebobina el archivo o reproduce el prefijo guardado cuando la entrada es stdin.
 5. Envía siete paquetes TS por datagrama UDP, 1316 bytes, contra deadlines absolutos de
    `CLOCK_MONOTONIC`.
 6. Termina al llegar a EOF. No hace loop.
@@ -314,3 +339,94 @@ logs/full-bbb.log
 La limitación del switch y la cadencia de FFmpeg fueron problemas independientes. El switch explicaba
 el backpressure a 11 Mb/s, pero no los glitches de FFmpeg, que también aparecieron a 4 y 8 Mb/s por
 cable directo.
+
+## MOV & TS Across MoQ tests with IRD-compliant output
+
+Se probaron tres fuentes end-to-end a través de MoQ: un MOV recodificado live, un TS crudo
+1080i59.94 y un TS europeo 1080i50. En los tres casos, MoQ transportó media VBR/non-stuffed y el
+egress reconstruyó un MPEG-TS CBR null-stuffed de 11 Mb/s. Los tres produjeron audio y video limpios
+en el Sencore por cable directo.
+
+### Ingreso MOV con audio AAC 5.1
+
+```bash
+ffmpeg -re -stream_loop -1 \
+  -i /home/ariel/projects/poky/downloads/bigbuckbunny1080p.mov \
+  -map 0:v:0 -map 0:a:0 \
+  -vf "scale=1920:1080,fps=60000/1001,interlace=scan=tff:lowpass=1,setfield=tff,format=yuv420p" \
+  -c:v libx264 \
+  -profile:v high \
+  -level 4.0 \
+  -preset veryfast \
+  -x264opts "interlaced=1:tff=1:weightp=0" \
+  -b:v 9M \
+  -maxrate 9M \
+  -bufsize 1M \
+  -g 30 \
+  -bf 2 \
+  -c:a copy \
+  -f mpegts - |
+/home/ariel/projects/moq-dev/target/release/moq-cli publish \
+  --url https://192.168.99.6 \
+  --client-tls-disable-verify \
+  --broadcast test/bbb \
+  ts
+```
+
+### Ingreso TS crudo 1080i59.94
+
+```bash
+ffmpeg -re -stream_loop -1 \
+  -i /home/ariel/projects/poky/downloads/bbb_1080i5994.ts \
+  -map 0 \
+  -c copy \
+  -f mpegts pipe:1 |
+/home/ariel/projects/moq-dev.main/target/release/moq \
+  --client-connect https://192.168.99.6 \
+  --client-tls-disable-verify \
+  --broadcast test/bbb \
+  import ts
+```
+
+### Ingreso TS crudo europeo 1080i50
+
+```bash
+ffmpeg -re -stream_loop -1 \
+  -i /home/ariel/projects/moq-dev/notes/captures/CNNiEMEA2.ts \
+  -map 0 \
+  -c copy \
+  -f mpegts pipe:1 |
+/home/ariel/projects/moq-dev.main/target/release/moq \
+  --client-connect https://192.168.99.6 \
+  --client-tls-disable-verify \
+  --broadcast test/bbb \
+  import ts
+```
+
+Los dos comandos TS usan `-c copy`, por lo que conservan el video codificado, framerate, field order,
+audio y relaciones temporales sin recodificar. Al omitir `-muxrate`, el TS entregado al importer es
+VBR/non-stuffed. El importer
+de MoQ descarta cualquier null stuffing de ingreso de todas formas.
+
+### Egress común hacia el Sencore
+
+```bash
+/home/ariel/projects/moq-dev.main/target/release/moq \
+  --client-connect https://192.168.99.6 \
+  --client-tls-disable-verify \
+  --broadcast test/bbb \
+  export ts |
+ffmpeg -hide_banner -loglevel warning \
+  -i pipe:0 \
+  -map 0:v:0 \
+  -map '0:a:0?' \
+  -c copy \
+  -muxrate 11M \
+  -pcr_period 20 \
+  -f mpegts pipe:1 |
+/home/ariel/projects/rawsendmpeg2ts/build/rawsendmpeg2ts \
+  --stdin 239.1.74.20:9009
+```
+
+En el egress, FFmpeg vuelve a crear el multiplexor CBR y sus null packets. `rawsendmpeg2ts` conserva
+ese TS byte por byte y aplica el pacing UDP uniforme que necesita el IRD.
