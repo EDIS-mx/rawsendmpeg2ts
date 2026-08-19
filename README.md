@@ -1,6 +1,6 @@
 # rawsendmpeg2ts
 
-Reproduce una vez un archivo MPEG-TS CBR sobre UDP, sin remux ni modificación del payload. Es un test mínimo para alimentar un IRD de hardware con datagramas uniformemente espaciados. El programa está escrito en C11 y usa únicamente POSIX y sockets IPv4. No pretende ser un sender de producción ni una herramienta MPEG-TS general.
+Plays a CBR MPEG-TS file once over UDP, with no remux and no payload modification. It is a minimal test tool for feeding a hardware IRD with uniformly spaced datagrams. The program is written in C11 and uses only POSIX and IPv4 sockets. It is not intended to be a production sender nor a general MPEG-TS tool.
 
 <img width="543" height="461" alt="Captura de pantalla_20260703_183618" src="https://github.com/user-attachments/assets/38ed49d3-7b1d-4b70-b5a7-baf8347c697f" />
 
@@ -11,25 +11,25 @@ Reproduce una vez un archivo MPEG-TS CBR sobre UDP, sin remux ni modificación d
 cmake -B build
 cmake --build build
 
-# El binario queda en `build/rawsendmpeg2ts`.
+# The binary is produced at `build/rawsendmpeg2ts`.
 $ rawsendmpeg2ts <file.ts|--stdin> <ip:port>
 ```
 
-Ejemplo:
+Example:
 
 ```bash
 ./build/rawsendmpeg2ts /path/to/golden.ts 239.1.74.20:9009
 ```
 
-Un TS CBR null-stuffed también puede llegar por stdin. El sender conserva en memoria el tramo de
-aproximadamente un segundo usado para derivar la tasa y después continúa leyendo la tubería:
+A null-stuffed CBR TS may also arrive over stdin. The sender keeps in memory the segment of
+approximately one second used to derive the rate, and then continues reading from the pipe:
 
 ```bash
 cat /path/to/golden.ts |
   ./build/rawsendmpeg2ts --stdin 239.1.74.20:9009
 ```
 
-Para convertir la salida TS non-stuffed de MoQ en CBR antes del pacing UDP:
+To convert the non-stuffed TS output of MoQ into CBR before UDP pacing:
 
 ```bash
 /home/ariel/projects/moq-dev.main/target/release/moq \
@@ -43,104 +43,108 @@ Para convertir la salida TS non-stuffed de MoQ en CBR antes del pacing UDP:
   ./build/rawsendmpeg2ts --stdin 239.1.74.20:9009
 ```
 
-FFmpeg realiza el remux y agrega null stuffing. `rawsendmpeg2ts` deriva el muxrate resultante y corrige
-la cadencia UDP. No usar `-re` en esta tubería: el sender raw es el único dueño del pacing final.
+FFmpeg performs the remux and adds null stuffing. `rawsendmpeg2ts` derives the resulting muxrate and
+fixes the UDP cadence. Do not use `-re` in this pipeline: the raw sender is the sole owner of the
+final pacing.
 
-El destino debe ser IPv4. Para multicast se configura TTL 4 y se desactiva multicast loopback. La
-interfaz de egreso la decide la ruta del sistema operativo:
+The destination must be IPv4. For multicast, TTL 4 is configured and multicast loopback is disabled.
+The egress interface is decided by the operating system route:
 
 ```bash
 ip route get 239.1.74.20
 ```
 
-## Qué hace
+## What it does
 
-1. Verifica que el archivo sea una secuencia completa de paquetes TS de 188 bytes.
-2. Encuentra el primer PID con PCR.
-3. Mide aproximadamente un segundo de separación PCR y deriva la tasa a partir de bytes/PCR.
-4. Rebobina el archivo o reproduce el prefijo guardado cuando la entrada es stdin.
-5. Envía siete paquetes TS por datagrama UDP, 1316 bytes, contra deadlines absolutos de
-   `CLOCK_MONOTONIC`.
-6. Termina al llegar a EOF. No hace loop.
+1. Verifies that the file is a complete sequence of 188-byte TS packets.
+2. Finds the first PID carrying PCR.
+3. Measures approximately one second of PCR separation and derives the rate from bytes/PCR.
+4. Rewinds the file, or replays the stored prefix when the input is stdin.
+5. Sends seven TS packets per UDP datagram, 1316 bytes, against absolute `CLOCK_MONOTONIC`
+   deadlines.
+6. Terminates at EOF. It does not loop.
 
-El socket es bloqueante y usa `SO_SNDBUF=32768`. Los deadlines permanecen anclados al inicio para no
-reducir la tasa de largo plazo después de un atraso temporal.
+The socket is blocking and uses `SO_SNDBUF=32768`. Deadlines remain anchored to the start so that a
+temporary delay does not reduce the long-term rate.
 
-El programa reporta cada cinco segundos los wakes que llegaron más de dos intervalos de datagrama
-tarde. Son telemetría, no una condición de aborto:
+Every five seconds the program reports the wakes that arrived more than two datagram intervals late.
+These are telemetry, not an abort condition:
 
 ```text
 [t+ 500.0s] slips this 5s: 3 (worst 1.9 ms at t+496.6s), total 303
 ```
 
-Un número pequeño y acotado de slips es normal bajo el scheduler de Linux. Lo preocupante es atraso
-creciente, backpressure sostenido o una correlación visible con freezes del IRD.
+A small, bounded number of slips is normal under the Linux scheduler. What matters is growing delay,
+sustained backpressure, or a visible correlation with IRD freezes.
 
-## Qué no hace
+## What it does not do
 
-- No remuxa, rellena, elimina ni reescribe paquetes TS.
-- No corrige PCR, PTS, DTS, continuity counters ni T-STD.
-- No soporta VBR como caso general. La tasa se deriva suponiendo una relación CBR entre PCR y posición
-  de byte.
-- No selecciona interfaz multicast explícitamente.
-- No soporta IPv6, reproducción en loop ni múltiples programas configurables.
-- No configura `SCHED_FIFO`, afinidad de CPU ni `mlockall`.
+- It does not remux, stuff, drop, or rewrite TS packets.
+- It does not correct PCR, PTS, DTS, continuity counters, or T-STD.
+- It does not support VBR as a general case. The rate is derived assuming a CBR relationship between
+  PCR and byte position.
+- It does not select the multicast interface explicitly.
+- It does not support IPv6, loop playback, or multiple configurable programs.
+- It does not configure `SCHED_FIFO`, CPU affinity, or `mlockall`.
 
-## Cama de pruebas necesaria
+## Required test bed
 
-Se validó con un enlace directo (los switches pueden tener storm control multicast e invalidan la prueba, hacen _pacing_ falso y parece que pasa, o detienen el _storm_ y parece que falla).
+Validation was performed over a direct link (switches may apply multicast storm control and
+invalidate the test: they produce false _pacing_ and it appears to pass, or they stop the _storm_ and
+it appears to fail).
 
-**Pare de sufrir, conecte un cable directo al IRD**:
+**Stop the suffering: connect a direct cable to the IRD**:
 
 ```text
-PC/NIC -> cable Ethernet -> Sencore
+PC/NIC -> Ethernet cable -> Sencore
 ```
-## ¿Audio? ¡Si!
-Es importante probar con audio, clics y micro silencios evidencian rápidamente problemas que sólo video oculta.
+## Audio? Yes.
+Testing with audio is important; clicks and micro-silences quickly expose problems that video alone
+hides.
 
-**Pare de sufrir, conecte una bocina**:
+**Stop the suffering: connect a speaker**:
 
-## Switches / red
+## Switches / network
 
-No debe haber switch entre el sender y el IRD. El PC y el Sencore necesitan direcciones estáticas en
-la misma subred. Multicast funciona sobre el enlace directo y la ruta debe apuntar a la NIC conectada
-al Sencore.
+There must be no switch between the sender and the IRD. The PC and the Sencore need static addresses
+in the same subnet. Multicast works over the direct link, and the route must point to the NIC
+connected to the Sencore.
 
-Antes de cada prueba:
+Before each test:
 
 ```bash
 ip route get 239.1.74.20
-ethtool <interfaz> | grep -E 'Speed|Duplex|Link detected'
-ethtool -S <interfaz> | grep -E 'rx_flow_control_xon|rx_flow_control_xoff'
+ethtool <interface> | grep -E 'Speed|Duplex|Link detected'
+ethtool -S <interface> | grep -E 'rx_flow_control_xon|rx_flow_control_xoff'
 ```
 
-Durante la corrida, `rx_flow_control_xoff` debe permanecer estable. El resultado se evalúa durante el
-archivo completo, no solamente durante un smoke test: reproducción A/V limpia, terminación normal,
-sin atraso creciente y sin backpressure sostenido.
+During the run, `rx_flow_control_xoff` must remain stable. The result is evaluated over the complete
+file, not only during a smoke test: clean A/V playback, normal termination, no growing delay, and no
+sustained backpressure.
 
-### Por qué un switch invalida la prueba
+### Why a switch invalidates the test
 
-Un switch puede aplicar storm-control, multicast policing, rate limiting, shaping o PAUSE 802.3x. Eso
-puede cambiar la tasa y la cadencia aunque el puerto negocie a 100 Mb/s o 1 Gb/s. El sender entonces
-mide comportamiento de la ruta y no solamente del archivo, su scheduler y el IRD.
+A switch may apply storm control, multicast policing, rate limiting, shaping, or 802.3x PAUSE. That
+can change the rate and the cadence even if the port negotiates at 100 Mb/s or 1 Gb/s. The sender
+then measures the behavior of the path and not only that of the file, its scheduler, and the IRD.
 
-En este banco, la ruta a través de un switch produjo el siguiente falso diagnóstico:
+On this bench, the path through a switch produced the following false diagnosis:
 
-- El TS declaraba 11 Mb/s, pero FFmpeg tardó 689.866 s en transportar 596.459 s de media.
-- El throughput UDP real fue 9.511 Mb/s, casi exactamente un límite Ethernet de 10 Mb/s después de
-  overhead.
-- `rx_flow_control_xoff` crecía unas 65 veces por segundo.
-- `rawsendmpeg2ts` acumulaba atraso y el IRD presentaba micro-freezes.
-- Con cable directo, el mismo TS corrió completo a 11 Mb/s, sin XOFF y con A/V perfecto.
-- El enlace directo también reprodujo correctamente un TS broadcast de 20 Mb/s.
+- The TS declared 11 Mb/s, but FFmpeg took 689.866 s to transport 596.459 s of media.
+- Actual UDP throughput was 9.511 Mb/s, almost exactly a 10 Mb/s Ethernet limit after overhead.
+- `rx_flow_control_xoff` grew about 65 times per second.
+- `rawsendmpeg2ts` accumulated delay and the IRD showed micro-freezes.
+- With a direct cable, the same TS ran to completion at 11 Mb/s, with no XOFF and perfect A/V.
+- The direct link also played a 20 Mb/s broadcast TS correctly.
 
-Por eso una prueba detrás de un switch es diagnóstica, no un Gate. Si resulta distinta al cable
-directo, hay que revisar storm-control, policing multicast, flow control y configuración de puertos.
+For that reason a test behind a switch is diagnostic, not a Gate. If the result differs from the
+direct cable, storm control, multicast policing, flow control, and port configuration must be
+reviewed.
 
-## Demostración local sin IRD
+## Local demonstration without an IRD
 
-`udp_sink.py` recibe datagramas, mide throughput e inter-arrival y puede guardar un prefijo para probar
-fidelidad de bytes.
+`udp_sink.py` receives datagrams, measures throughput and inter-arrival time, and can save a prefix
+to test byte fidelity.
 
 ```bash
 python3 udp_sink.py \
@@ -155,30 +159,30 @@ cmp -n 1000000 rx.bin /path/to/golden.ts
 cat stats.json
 ```
 
-Loopback sirve como smoke test. Para medir pacing real se necesita una captura en el lado receptor.
+Loopback serves as a smoke test. Measuring real pacing requires a capture on the receiver side.
 
-## Goldens CBR stuffed de Big Buck Bunny
+## Stuffed CBR goldens of Big Buck Bunny
 
-Todos los goldens usados en el banco son H.264, 1920x1080i59.94 top-field-first, AAC 5.1 a 48 kHz,
-PCR cada 20 ms y MPEG-TS CBR con null stuffing.
+All goldens used on the bench are H.264, 1920x1080i59.94 top-field-first, AAC 5.1 at 48 kHz, PCR
+every 20 ms, and CBR MPEG-TS with null stuffing.
 
-Fuente común:
+Common source:
 
 ```text
 /home/ariel/projects/moq-dev/notes/captures/big_buck_bunny_1080p_h264.mov
 ```
 
-El `.mov` original se descargó del archivo oficial de películas de Big Buck Bunny de Blender:
+The original `.mov` was downloaded from Blender's official Big Buck Bunny movie archive:
 
 ```text
 https://download.blender.org/peach/bigbuckbunny_movies/
 ```
 
-Los archivos `.ts` están fuera del repositorio. Las recetas requieren FFmpeg con `libx264`.
+The `.ts` files are outside the repository. The recipes require FFmpeg with `libx264`.
 
 
 ```bash
-### Generar 4 Mb/s
+### Generate 4 Mb/s
 ffmpeg -hide_banner -y \
   -i /home/ariel/projects/moq-dev/notes/captures/big_buck_bunny_1080p_h264.mov \
   -map 0:v:0 -map 0:a:0 \
@@ -192,7 +196,7 @@ ffmpeg -hide_banner -y \
   -f mpegts \
   /home/ariel/projects/moq-dev/notes/captures/golden-bbb-1080i5994-4m.ts
 
-### Generar 8 Mb/s
+### Generate 8 Mb/s
 ffmpeg -hide_banner -y \
   -i /home/ariel/projects/moq-dev/notes/captures/big_buck_bunny_1080p_h264.mov \
   -map 0:v:0 -map 0:a:0 \
@@ -206,7 +210,7 @@ ffmpeg -hide_banner -y \
   -f mpegts \
   /home/ariel/projects/moq-dev/notes/captures/golden-bbb-1080i5994-8m.ts
 
-### Generar 11 Mb/s
+### Generate 11 Mb/s
 ffmpeg -hide_banner -y \
   -i /home/ariel/projects/moq-dev/notes/captures/big_buck_bunny_1080p_h264.mov \
   -map 0:v:0 -map 0:a:0 \
@@ -220,7 +224,7 @@ ffmpeg -hide_banner -y \
   -f mpegts \
   /home/ariel/projects/moq-dev/notes/captures/golden-bbb-1080i-clean.ts
 
-### Generar 20 Mb/s
+### Generate 20 Mb/s
 ffmpeg -hide_banner -y \
   -i /home/ariel/projects/moq-dev/notes/captures/big_buck_bunny_1080p_h264.mov \
   -map 0:v:0 -map 0:a:0 \
@@ -235,7 +239,7 @@ ffmpeg -hide_banner -y \
   /home/ariel/projects/moq-dev/notes/captures/golden-bbb-1080i5994-20m.ts
 ```
 
-## Emitir los golden specimens vis rawsendmpeg2ts
+## Emitting the golden specimens via rawsendmpeg2ts
 
 ```bash
 ### 4 Mb/s
@@ -259,9 +263,10 @@ ffmpeg -hide_banner -y \
   239.1.74.20:9009
 ```
 
-## Emitir con TSDuck
+## Emitting with TSDuck
 
-Los cuatro casos también produjeron A/V correcto en el IRD con TSDuck nativo por cable directo. La dirección local fija el egreso a la NIC `10.6.6.1` y evita que multicast use otra interfaz.
+The four cases also produced correct A/V on the IRD with native TSDuck over a direct cable. The local
+address pins the egress to NIC `10.6.6.1` and prevents multicast from using another interface.
 
 ```bash
 ### 4 Mb/s
@@ -293,61 +298,61 @@ tsp \
   239.1.74.20:9009
 ```
 
-## Artifacts verificados
+## Verified artifacts
 
-| Mux | Archivo | Tamaño | Bitrate medido | Null packets | SHA-256 |
+| Mux | File | Size | Measured bitrate | Null packets | SHA-256 |
 |---:|---|---:|---:|---:|---|
 | 4 Mb/s | `golden-bbb-1080i5994-4m.ts` | 298,232,672 bytes | 3,999,875 bit/s | 268,589 (16.9%) | `b2374b2982f160873c784fe14ca0184bc9913a4859da4c746d0dafef9c04ff7e` |
 | 8 Mb/s | `golden-bbb-1080i5994-8m.ts` | 596,506,140 bytes | 8,000,584 bit/s | 522,046 (16.5%) | `72deb806f6fcf7f0e42fa723febadd82bbe167442c0bf0a7641987df88edc874` |
 | 11 Mb/s | `golden-bbb-1080i-clean.ts` | 820,195,308 bytes | 11,000,795 bit/s | 901,466 (20.7%) | `81d4b5ab2613661e53e95d88e8f32f33b83272335cd33d288bc7b9a281817560` |
 | 20 Mb/s | `golden-bbb-1080i5994-20m.ts` | 1,491,262,248 bytes | 20,001,550 bit/s | 828,215 (10.4%) | `c10208f2a135fdddefb32c42a0a4142db309c3d02fe4399d7e2721a186891723` |
 
-Los hashes identifican los artifacts usados en el banco. Distintas versiones de FFmpeg o `libx264`
-pueden producir un archivo diferente usando los mismos parámetros.
+The hashes identify the artifacts used on the bench. Different versions of FFmpeg or `libx264` may
+produce a different file using the same parameters.
 
-## Resultados directos con el Sencore
+## Direct results with the Sencore
 
-| Mux | Corrida | Slips | Resultado |
+| Mux | Run | Slips | Result |
 |---:|---|---:|---|
-| 4 Mb/s | parcial | 0 | A/V perfecto |
-| 8 Mb/s | parcial | 0 | A/V perfecto |
-| 11 Mb/s | completa, ~596 s | 19, máximo 7.966 ms | A/V perfecto |
-| 20 Mb/s | completa, ~596 s | 306, máximo 7.294 ms | A/V perfecto |
+| 4 Mb/s | partial | 0 | perfect A/V |
+| 8 Mb/s | partial | 0 | perfect A/V |
+| 11 Mb/s | complete, ~596 s | 19, maximum 7.966 ms | perfect A/V |
+| 20 Mb/s | complete, ~596 s | 306, maximum 7.294 ms | perfect A/V |
 
-En la corrida de 20 Mb/s, 290 de los 306 slips se concentraron en un episodio de unos 15 segundos.
-No hubo atraso acumulativo ni efecto visible en A/V.
+In the 20 Mb/s run, 290 of the 306 slips were concentrated in a single episode of about 15 seconds.
+There was no cumulative delay and no visible effect on A/V.
 
-TSDuck nativo también produjo A/V correcto a 4, 8, 11 y 20 Mb/s usando `regulate` y ráfagas de siete
-paquetes. En el Gate directo, `rawsendmpeg2ts` alcanza la misma aceptación del IRD que TSDuck.
+Native TSDuck also produced correct A/V at 4, 8, 11, and 20 Mb/s using `regulate` and bursts of seven
+packets. On the direct Gate, `rawsendmpeg2ts` achieves the same IRD acceptance as TSDuck.
 
-Logs completos:
+Complete logs:
 
 ```text
 logs/full-bbb.log
   logs/full-bbb-20m.log
 ```
 
-## Comparación con FFmpeg
+## Comparison with FFmpeg
 
-- Los mismos CBR de 4, 8 y 11 Mb/s produjeron glitches con FFmpeg `-re` por cable directo.
-- Los tres funcionaron con `rawsendmpeg2ts` y cero slips en las pruebas comparativas.
-- El remux de 4 Mb/s producido por FFmpeg funcionó al reproducirse con `rawsendmpeg2ts`. Esto separó
-  el contenido remuxeado de la cadencia UDP.
-- FFmpeg regula la lectura por timestamps, pero sus escrituras UDP ocurren en grupos y con tamaños
-  variables. Eso no equivale a espaciar uniformemente cada datagrama TS.
+- The same 4, 8, and 11 Mb/s CBR streams produced glitches with FFmpeg `-re` over a direct cable.
+- All three worked with `rawsendmpeg2ts` and zero slips in the comparative tests.
+- The 4 Mb/s remux produced by FFmpeg worked when played back with `rawsendmpeg2ts`. This separated
+  the remuxed content from the UDP cadence.
+- FFmpeg regulates reading by timestamps, but its UDP writes occur in groups and with variable sizes.
+  That is not equivalent to spacing every TS datagram uniformly.
 
-La limitación del switch y la cadencia de FFmpeg fueron problemas independientes. El switch explicaba
-el backpressure a 11 Mb/s, pero no los glitches de FFmpeg, que también aparecieron a 4 y 8 Mb/s por
-cable directo.
+The switch limitation and the FFmpeg cadence were independent problems. The switch explained the
+backpressure at 11 Mb/s, but not the FFmpeg glitches, which also appeared at 4 and 8 Mb/s over a
+direct cable.
 
 ## MOV & TS Across MoQ tests with IRD-compliant output
 
-Se probaron tres fuentes end-to-end a través de MoQ: un MOV recodificado live, un TS crudo
-1080i59.94 y un TS europeo 1080i50. En los tres casos, MoQ transportó media VBR/non-stuffed y el
-egress reconstruyó un MPEG-TS CBR null-stuffed de 11 Mb/s. Los tres produjeron audio y video limpios
-en el Sencore por cable directo.
+Three sources were tested end-to-end through MoQ: a live re-encoded MOV, a raw 1080i59.94 TS, and a
+European 1080i50 TS. In all three cases, MoQ transported VBR/non-stuffed media and the egress
+reconstructed a null-stuffed 11 Mb/s CBR MPEG-TS. All three produced clean audio and video on the
+Sencore over a direct cable.
 
-### Ingreso MOV con audio AAC 5.1
+### MOV ingress with AAC 5.1 audio
 
 ```bash
 ffmpeg -re -stream_loop -1 \
@@ -373,7 +378,7 @@ ffmpeg -re -stream_loop -1 \
   ts
 ```
 
-### Ingreso TS crudo 1080i59.94
+### Raw 1080i59.94 TS ingress
 
 ```bash
 ffmpeg -re -stream_loop -1 \
@@ -388,7 +393,7 @@ ffmpeg -re -stream_loop -1 \
   import ts
 ```
 
-### Ingreso TS crudo europeo 1080i50
+### Raw European 1080i50 TS ingress
 
 ```bash
 ffmpeg -re -stream_loop -1 \
@@ -403,12 +408,11 @@ ffmpeg -re -stream_loop -1 \
   import ts
 ```
 
-Los dos comandos TS usan `-c copy`, por lo que conservan el video codificado, framerate, field order,
-audio y relaciones temporales sin recodificar. Al omitir `-muxrate`, el TS entregado al importer es
-VBR/non-stuffed. El importer
-de MoQ descarta cualquier null stuffing de ingreso de todas formas.
+Both TS commands use `-c copy`, so they preserve the encoded video, framerate, field order, audio,
+and temporal relationships without re-encoding. By omitting `-muxrate`, the TS delivered to the
+importer is VBR/non-stuffed. The MoQ importer discards any ingress null stuffing in any case.
 
-### Egress común hacia el Sencore
+### Common egress toward the Sencore
 
 ```bash
 /home/ariel/projects/moq-dev.main/target/release/moq \
@@ -428,5 +432,5 @@ ffmpeg -hide_banner -loglevel warning \
   --stdin 239.1.74.20:9009
 ```
 
-En el egress, FFmpeg vuelve a crear el multiplexor CBR y sus null packets. `rawsendmpeg2ts` conserva
-ese TS byte por byte y aplica el pacing UDP uniforme que necesita el IRD.
+At the egress, FFmpeg recreates the CBR multiplex and its null packets. `rawsendmpeg2ts` preserves
+that TS byte for byte and applies the uniform UDP pacing the IRD requires.
